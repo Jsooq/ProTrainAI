@@ -33,15 +33,16 @@ from langchain_core.output_parsers import StrOutputParser
 LOG_PATH = "usage_log.csv"
 
 
-def log_usage(player: str, age: str, notes: str):
+def log_usage(athlete_name: str, player: str, age: str, notes: str):
     file_exists = os.path.exists(LOG_PATH)
     try:
         with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["timestamp", "player", "age", "notes"])
+                writer.writerow(["timestamp", "athlete_name", "player", "age", "notes"])
             writer.writerow([
                 datetime.datetime.now().isoformat(timespec="seconds"),
+                athlete_name,
                 player,
                 age or "",
                 notes or "",
@@ -417,37 +418,42 @@ def build_rag_chain(api_key: str):
     prompt_template = PromptTemplate(
         input_variables=["context", "question"],
         template="""
-You are ProTrainAI, an elite basketball training assistant. You help coaches
-design 1-on-1 training sessions for youth players (ages 8-18) inspired by
-NBA players' real training methods.
+You are ProTrainAI, an elite basketball training assistant. You speak
+directly to youth players (ages 8-18) and give them a personal training
+session inspired by an NBA player's real training methods.
 
 Use ONLY the player information provided below to design the workout.
 Include real drills, motivational quotes from the player, and YouTube
-search terms so the coach can find videos to show their athlete.
+search terms so the athlete can find videos themselves.
+
+Write directly to the athlete, second person, like a personal trainer
+talking to them one-on-one. Use "you" and "your" throughout — never
+"the athlete" or "your player." This workout is being delivered straight
+to the person doing it, not relayed through a coach.
 
 PLAYER KNOWLEDGE BASE:
 {context}
 
-COACH'S REQUEST:
+ATHLETE'S REQUEST:
 {question}
 
 Respond with a complete, structured 60-minute training session in this format:
 
-🏀 PROTRAINAI SESSION PLAN
-Player Inspiration: [Player Name]
-Theme: [Core skill focus]
+🏀 YOUR PROTRAINAI SESSION
+Inspired By: [Player Name]
+Today's Focus: [Core skill focus]
 
-💬 OPENING QUOTE (Read this to your athlete at the start):
-[Quote from the player]
+💬 GET LOCKED IN:
+[Quote from the player, framed as something to read to yourself before you start, use different quotes each query]
 
-📋 SESSION BREAKDOWN:
+📋 YOUR SESSION:
 
 ⏱️ WARMUP (10 min)
-[2-3 warmup activities]
+[2-3 warmup activities, written as direct instructions: "Start with...", "Then do..."]
 
 🔧 SKILL BLOCK 1 (15 min) — [Skill name]
-[Drill name]: [Instructions]
-[Coaching cue from the player's style]
+[Drill name]: [Instructions written directly to the athlete: "Dribble to...", "Take 10 shots from..."]
+[A coaching cue in the player's style]
 
 🔧 SKILL BLOCK 2 (15 min) — [Skill name]
 [Drill name]: [Instructions]
@@ -456,19 +462,19 @@ Theme: [Core skill focus]
 🔧 SKILL BLOCK 3 (10 min) — [Skill name]
 [Drill name]: [Instructions]
 
-🏁 COMPETITIVE FINISH (8 min)
-[1v1 or scoring challenge tied to session theme]
+🏁 FINISH STRONG (8 min)
+[A challenge or competitive finish, written as a direct dare/goal: "See if you can..."]
 
-🧘 COOLDOWN & MINDSET (2 min)
-[Closing quote + reflection question for the athlete]
+🧘 COOL DOWN (2 min)
+[Closing quote + a reflection question asked directly: "Ask yourself..."]
 
-🎥 VIDEOS TO SHOW YOUR ATHLETE:
+🎥 WATCH THESE NEXT:
 Search YouTube for:
 - [Search term 1]
 - [Search term 2]
 
-💡 COACH NOTES:
-[2-3 tips for adapting this session to a youth player]
+💡 ONE THING TO REMEMBER:
+[1-2 direct, motivating tips for the athlete to carry into their next session]
 """,
     )
 
@@ -583,6 +589,12 @@ player_names = [doc.metadata["player"] for doc in player_data]
 st.divider()
 
 # ─── INPUT FORM ─────────────────────────────────────────────────
+player_name_input = st.text_input(
+    "What's your name?",
+    placeholder="e.g. Jordan",
+    help="So your coach knows who trained today.",
+)
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -592,7 +604,7 @@ with col1:
     )
 
 with col2:
-    age = st.text_input("Player age (optional)", placeholder="e.g. 12")
+    age = st.text_input("Your age (optional)", placeholder="e.g. 12")
 
 notes = st.text_area(
     "Anything specific you want to work on? (optional)",
@@ -606,10 +618,17 @@ st.divider()
 
 # ─── GENERATE & DISPLAY OUTPUT ──────────────────────────────────
 if generate_clicked:
+    if not player_name_input.strip():
+        st.warning("👋 Type your name above first, so your coach knows who this workout is for!")
+        st.stop()
+
     # Build the query from the dropdown + optional notes
-    query_parts = [f"Build me a 60-minute workout inspired by {selected_player}."]
+    query_parts = [
+        f"My name is {player_name_input.strip()}. "
+        f"Build me a 60-minute workout inspired by {selected_player}."
+    ]
     if age:
-        query_parts.append(f"The player is {age} years old.")
+        query_parts.append(f"I am {age} years old.")
     if notes:
         query_parts.append(f"Specific focus: {notes}")
     query = " ".join(query_parts)
@@ -626,7 +645,7 @@ if generate_clicked:
     st.session_state["last_player"] = selected_player
 
     # Log this generation (best-effort, never blocks the user)
-    log_usage(selected_player, age, notes)
+    log_usage(player_name_input.strip(), selected_player, age, notes)
 
 # Display the most recent workout, if one exists
 if "last_response" in st.session_state:
