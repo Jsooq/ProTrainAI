@@ -1,5 +1,5 @@
 """
-🏀 CoachBot — Streamlit UI
+🏀 ProTrainAI — Streamlit UI
 A kid-friendly interface for generating NBA-inspired workout plans.
 
 Run locally with:
@@ -10,6 +10,7 @@ import streamlit as st
 import os
 import shutil
 import datetime
+import csv
 
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -21,10 +22,40 @@ from langchain_core.output_parsers import StrOutputParser
 
 
 # ─────────────────────────────────────────────────────────────────
+# 📊 USAGE LOGGING
+# Appends one row per generated workout to a local CSV.
+# NOTE: Streamlit Cloud's filesystem resets on every app restart/
+# redeploy, so this log does NOT persist long-term in production.
+# It's great for local testing or short stretches between restarts.
+# For permanent tracking, this can be swapped for a Google Sheet
+# or external database later.
+# ─────────────────────────────────────────────────────────────────
+LOG_PATH = "usage_log.csv"
+
+
+def log_usage(player: str, age: str, notes: str):
+    file_exists = os.path.exists(LOG_PATH)
+    try:
+        with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "player", "age", "notes"])
+            writer.writerow([
+                datetime.datetime.now().isoformat(timespec="seconds"),
+                player,
+                age or "",
+                notes or "",
+            ])
+    except Exception:
+        # Logging should never break the actual workout generation
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────
 # PAGE CONFIG — must be the first Streamlit command
 # ─────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="CoachBot 🏀",
+    page_title="ProTrainAI 🏀",
     page_icon="🏀",
     layout="centered",
 )
@@ -176,6 +207,9 @@ def load_player_data():
 
 # ─────────────────────────────────────────────────────────────────
 # 🔧 BUILD THE RAG PIPELINE (cached so it only runs once per session)
+# Note: this takes 30-90 seconds the FIRST time only (downloading the
+# embedding model + building the vector DB). After that it's instant
+# for the rest of the session because @st.cache_resource holds onto it.
 # ─────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_rag_chain(api_key: str):
@@ -183,6 +217,9 @@ def build_rag_chain(api_key: str):
 
     player_data = load_player_data()
 
+    # This line downloads a ~90MB model the very first time it ever
+    # runs on a given server. That download is what causes the long
+    # first-run wait — it's not actually hanging.
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
     db_path = "./coachbot_db"
@@ -205,7 +242,7 @@ def build_rag_chain(api_key: str):
     prompt_template = PromptTemplate(
         input_variables=["context", "question"],
         template="""
-You are CoachBot, an elite basketball training assistant. You help coaches
+You are ProTrainAI, an elite basketball training assistant. You help coaches
 design 1-on-1 training sessions for youth players (ages 8-18) inspired by
 NBA players' real training methods.
 
@@ -221,7 +258,7 @@ COACH'S REQUEST:
 
 Respond with a complete, structured 60-minute training session in this format:
 
-🏀 COACHBOT SESSION PLAN
+🏀 PROTRAINAI SESSION PLAN
 Player Inspiration: [Player Name]
 Theme: [Core skill focus]
 
@@ -285,9 +322,47 @@ def get_api_key():
 
 
 # ─────────────────────────────────────────────────────────────────
+# 🔒 ACCESS GATE
+# A simple shared password so random visitors with the link can't
+# burn through your Google API quota. Not bank-grade security —
+# just enough friction to keep this to your athletes.
+# Set APP_PASSWORD in Streamlit Cloud's Secrets to enable this.
+# If no APP_PASSWORD secret is set, the gate is skipped entirely
+# (useful for local testing without typing a password every time).
+# ─────────────────────────────────────────────────────────────────
+def check_password():
+    correct_password = st.secrets.get("APP_PASSWORD", None)
+
+    # No password configured at all -> skip the gate (local dev mode)
+    if not correct_password:
+        return True
+
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.title("🏀 ProTrainAI")
+    st.markdown("##### Enter your access code to continue")
+
+    entered = st.text_input("Access code", type="password", key="password_input")
+
+    if st.button("Enter", type="primary"):
+        if entered == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("That code isn't right — check with your coach and try again.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
+
+# ─────────────────────────────────────────────────────────────────
 # 🎨 UI
 # ─────────────────────────────────────────────────────────────────
-st.title("🏀 CoachBot")
+st.title("🏀 ProTrainAI")
 st.markdown("##### Build a workout inspired by your favorite NBA player")
 
 api_key = get_api_key()
@@ -306,12 +381,26 @@ if not api_key:
         st.info("👈 Enter your Google API key in the sidebar to get started.")
         st.stop()
 
-# Build the chain (cached — only runs once)
-with st.spinner("Warming up CoachBot... 🏀"):
+# Build the chain (cached — only runs once per server, not once per user)
+is_first_load = "coachbot_warmed_up" not in st.session_state
+
+if is_first_load:
+    status_box = st.status("Starting up ProTrainAI for the first time...", expanded=True)
+    status_box.write("📦 Downloading skill model (only happens once — ~30-60 sec)...")
+    try:
+        rag_chain, player_data = build_rag_chain(api_key)
+        st.session_state["coachbot_warmed_up"] = True
+        status_box.write("✅ Ready!")
+        status_box.update(label="ProTrainAI is ready!", state="complete", expanded=False)
+    except Exception as e:
+        status_box.update(label="Setup failed", state="error")
+        st.error(f"Something went wrong setting up ProTrainAI: {e}")
+        st.stop()
+else:
     try:
         rag_chain, player_data = build_rag_chain(api_key)
     except Exception as e:
-        st.error(f"Something went wrong setting up CoachBot: {e}")
+        st.error(f"Something went wrong setting up ProTrainAI: {e}")
         st.stop()
 
 player_names = [doc.metadata["player"] for doc in player_data]
@@ -350,16 +439,19 @@ if generate_clicked:
         query_parts.append(f"Specific focus: {notes}")
     query = " ".join(query_parts)
 
-    with st.spinner(f"CoachBot is building your {selected_player}-inspired workout... 🤖"):
+    with st.spinner(f"ProTrainAI is building your {selected_player}-inspired workout... 🤖"):
         try:
             response = rag_chain.invoke(query)
         except Exception as e:
-            st.error(f"CoachBot hit an error generating your workout: {e}")
+            st.error(f"ProTrainAI hit an error generating your workout: {e}")
             st.stop()
 
     # Save to session state so it persists across reruns (e.g. download button clicks)
     st.session_state["last_response"] = response
     st.session_state["last_player"] = selected_player
+
+    # Log this generation (best-effort, never blocks the user)
+    log_usage(selected_player, age, notes)
 
 # Display the most recent workout, if one exists
 if "last_response" in st.session_state:
@@ -370,7 +462,34 @@ if "last_response" in st.session_state:
     st.download_button(
         label="💾 Download this workout",
         data=st.session_state["last_response"],
-        file_name=f"coachbot_{st.session_state['last_player'].replace(' ', '_')}_{timestamp}.txt",
+        file_name=f"protrainai_{st.session_state['last_player'].replace(' ', '_')}_{timestamp}.txt",
         mime="text/plain",
         use_container_width=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# 📊 COACH-ONLY USAGE PANEL
+# Only visible since you're already past the password gate to be
+# running this code at all. Shows which players/skills get
+# requested most, pulled from the local CSV log.
+# Remember: this resets when the app restarts/redeploys.
+# ─────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    with st.expander("📊 Coach: Usage Stats"):
+        if os.path.exists(LOG_PATH):
+            import pandas as pd
+            log_df = pd.read_csv(LOG_PATH)
+            st.caption(f"{len(log_df)} workouts generated this session")
+            st.bar_chart(log_df["player"].value_counts())
+            st.dataframe(log_df.tail(20), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download full log (CSV)",
+                data=log_df.to_csv(index=False),
+                file_name="protrainai_usage_log.csv",
+                mime="text/csv",
+            )
+        else:
+            st.caption("No workouts generated yet.")
+
